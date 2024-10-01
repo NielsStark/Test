@@ -1,0 +1,181 @@
+import pandas as pd
+import numpy as np
+from scipy.stats import binom
+import plotly.graph_objects as go
+import dash
+import dash_core_components as dcc
+import dash_html_components as html
+from dash.dependencies import Input, Output
+import requests
+from bs4 import BeautifulSoup
+
+# Fonction pour récupérer les données depuis FlashScore
+def get_data_from_flashscore(sport):
+    url = f"https://www.flashscore.fr/{sport}/"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, "html.parser")
+
+    # Extraction des données pertinentes
+    team1_elements = soup.find_all("div", class_="event__participant--home")
+    team2_elements = soup.find_all("div", class_="event__participant--away")
+    score1_elements = soup.find_all("div", class_="event__score--home")
+    score2_elements = soup.find_all("div", class_="event__score--away")
+    result_elements = soup.find_all("div", class_="event__part")
+
+    team1_names = [team.text.strip() for team in team1_elements]
+    team2_names = [team.text.strip() for team in team2_elements]
+    score1_values = [int(score.text.strip()) for score in score1_elements]
+    score2_values = [int(score.text.strip()) for score in score2_elements]
+    result_values = [result.text.strip() for result in result_elements]
+
+    data = pd.DataFrame({
+        "team1": team1_names,
+        "team2": team2_names,
+        "score1": score1_values,
+        "score2": score2_values,
+        "result": result_values
+    })
+
+    return data
+
+# Définition des fonctions d'analyse (inchangées)
+def calculate_win_probability(team1, team2, data):
+    """
+    Calcule la probabilité de victoire d'une équipe contre une autre.
+    """
+    team1_wins = data.loc[(data['team1'] == team1) & (data['team2'] == team2), 'result'].sum()
+    team1_total_games = data.loc[(data['team1'] == team1) | (data['team2'] == team1)].shape[0]
+    
+    return team1_wins / team1_total_games
+
+def calculate_expected_score(team1, team2, data):
+    """
+    Calcule le score attendu pour un match entre deux équipes.
+    """
+    team1_avg_score = data.loc[data['team1'] == team1, 'score1'].mean()
+    team2_avg_score = data.loc[data['team2'] == team2, 'score2'].mean()
+    
+    return team1_avg_score, team2_avg_score
+
+def calculate_binomial_probability(team1, team2, target_score, data):
+    """
+    Calcule la probabilité binomiale qu'une équipe atteigne un score cible contre une autre.
+    """
+    team1_avg_score, team2_avg_score = calculate_expected_score(team1, team2, data)
+    n = team1_avg_score + team2_avg_score
+    p = calculate_win_probability(team1, team2, data)
+    
+    return binom.pmf(target_score, n, p)
+
+def get_recent_results(team1, team2, data, num_recent=5):
+    """
+    Récupère les résultats des 5 derniers matchs entre deux équipes.
+    """
+    team1_vs_team2 = data.loc[(data['team1'] == team1) & (data['team2'] == team2)] \
+                     .append(data.loc[(data['team1'] == team2) & (data['team2'] == team1)]) \
+                     .sort_index(ascending=False).head(num_recent)
+    
+    return team1_vs_team2
+
+# Application Dash
+app = dash.Dash(__name__)
+
+app.layout = html.Div([
+    html.H1("Analyse statistique sportive"),
+    html.Div([
+        html.Label("Sport:"),
+        dcc.Dropdown(
+            id='sport-dropdown',
+            options=[{'label': i, 'value': i} for i in ['football', 'basketball', 'tennis', 'hockey']],
+            value='football'
+        )
+    ]),
+    html.Div([
+        html.Label("Équipe 1:"),
+        dcc.Dropdown(
+            id='team1-dropdown',
+            options=[],
+            value='team_a'
+        )
+    ]),
+    html.Div([
+        html.Label("Équipe 2:"),
+        dcc.Dropdown(
+            id='team2-dropdown',
+            options=[],
+            value='team_b'
+        )
+    ]),
+    html.Div([
+        html.Label("Score cible:"),
+        dcc.Input(id='target-score', type='number', value=50)
+    ]),
+    html.Div([
+        html.Button('Calculer', id='calculate-button', n_clicks=0)
+    ]),
+    html.Div(id='output-div'),
+    html.Div([
+        html.H2("Meilleures probabilités de victoire"),
+        dcc.Graph(id='probability-graph')
+    ]),
+    html.Div([
+        html.H2("Derniers résultats"),
+        html.Div(id='recent-results')
+    ])
+])
+
+@app.callback(
+    [Output('team1-dropdown', 'options'),
+     Output('team2-dropdown', 'options'),
+     Output('output-div', 'children'),
+     Output('probability-graph', 'figure'),
+     Output('recent-results', 'children')],
+    [Input('sport-dropdown', 'value'),
+     Input('calculate-button', 'n_clicks'),
+     Input('team1-dropdown', 'value'),
+     Input('team2-dropdown', 'value'),
+     Input('target-score', 'value')])
+def update_output(selected_sport, n_clicks, team1, team2, target_score):
+    data = get_data_from_flashscore(selected_sport)
+
+    team1_options = [{'label': i, 'value': i} for i in data['team1'].unique()]
+    team2_options = [{'label': i, 'value': i} for i in data['team2'].unique()]
+
+    win_probability = calculate_win_probability(team1, team2, data)
+    expected_score1, expected_score2 = calculate_expected_score(team1, team2, data)
+    binomial_probability = calculate_binomial_probability(team1, team2, target_score, data)
+    
+    output_text = f"""
+        Probabilité de victoire de {team1} contre {team2}: {win_probability:.2%}
+        Score attendu pour le match {team1} vs {team2}: ({expected_score1:.1f}, {expected_score2:.1f})
+        Probabilité que {team1} marque {target_score} points contre {team2}: {binomial_probability:.2%}
+    """
+    
+    # Calculer les 5 meilleures probabilités de victoire
+    top_win_probabilities = data.groupby(['team1', 'team2'])['result'].mean().sort_values(ascending=False).head(5)
+    
+    fig = go.Figure(data=[go.Bar(
+        x=top_win_probabilities.index.get_level_values('team1') + ' vs ' + top_win_probabilities.index.get_level_values('team2'),
+        y=top_win_probabilities.values
+    )])
+    fig.update_layout(title='Meilleures probabilités de victoire', xaxis_title='Matchup', yaxis_title='Probabilité de victoire')
+    
+    # Récupérer les 5 derniers résultats des équipes
+    recent_results = get_recent_results(team1, team2, data)
+    
+    results_table = html.Table([
+        html.Tr([html.Th("Date"), html.Th("Équipe 1"), html.Th("Score 1"), html.Th("Équipe 2"), html.Th("Score 2")]),
+    ] + [
+        html.Tr([
+            html.Td(index.date()),
+            html.Td(row['team1']),
+            html.Td(row['score1']),
+            html.Td(row['team2']),
+            html.Td(row['score2'])
+        ]) for index, row in recent_results.iterrows()
+    ])
+    
+    return team1_options, team2_options, output_text, fig, results_table
+
+if __name__ == '__main__':
+    app.run_server(debug=True)
